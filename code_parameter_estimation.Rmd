@@ -60,7 +60,7 @@ for (i in 1:n_simulation){
 
 
 ```{r}
-# functions for kalman filtering
+# Functions for kalman filtering
 calculate_smoothing <- function(Y_value, K_value, rho_value, w_value) {
   n <- length(Y_value)
   K <- K_value
@@ -174,7 +174,7 @@ calculate_A <- function( n, K_value, rho_value, temp_matrix, E_eta, Var_eta){
 }
 
 
-# function for lambda equation
+# Function for lambda equation
 generate_lambda_equation <- function(n, K_value, vector_A) {
     function(lambda) {
         equation <- 2*lambda - n * K_value
