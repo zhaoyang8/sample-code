@@ -1,0 +1,280 @@
+
+
+```{r}
+# Zhaoyang Xu, June 2024, code for master thesis
+```
+
+```{r}
+# Import libraries
+library(nleqslv)
+```
+
+
+```{r}
+# Set fixed values for filtering threshold
+epsilon_filtering_equal <- 1e-6
+
+
+# Set true parameters
+n_simulation <- 200  # number of simulations
+n_y_length <- 200    # length of each true_y change
+true_K <- 3
+true_rho <- c(0.1, 0.3, 0.5)
+true_w <- c( 0.4, 0.2, 0.4 )
+
+
+# Set estimated parameters
+guessed_K <- 40  # number of states
+guessed_rho <- seq(0 + 1/guessed_K, 1 - 1/guessed_K, length.out = guessed_K)
+
+
+# Simulate X and Y
+simulate_Y <- function(){
+  x.pf <- matrix( rep( NA, n_y_length * true_K ), nrow = n_y_length )
+  Y <- rep( NA, n_y_length )
+  # Initialize x.pf[1,] ~ N(0, w[k])
+  for (k in 1:true_K){
+      x.pf[1,k] <- rnorm( 1, 0, sqrt(true_w[k]) ) 
+    }
+  
+  Y[1] <- sum( x.pf[1, ] )
+  # Simulate the process
+  for ( t in 1:(n_y_length-1) ){
+    for ( k in 1:true_K ){
+      x.pf[t+1, k] <- true_rho[k] * x.pf[t, k] + sqrt(1 - true_rho[k]^2) * sqrt(true_w[k]) * rnorm(1, 0, 1)
+    }
+    Y[t+1] <- sum( x.pf[t+1, ] )
+  }
+  
+  return(Y)
+}
+
+
+# Store simulated Y
+all_true_y <- matrix( rep( 0, n_simulation * n_y_length ), nrow = n_simulation )
+for (i in 1:n_simulation){
+  all_true_y[i,] <- simulate_Y()
+}
+
+```
+
+
+```{r}
+# functions for kalman filtering
+calculate_smoothing <- function(Y_value, K_value, rho_value, w_value) {
+  n <- length(Y_value)
+  K <- K_value
+  Y <- Y_value
+  rho <- rho_value
+  w <- w_value
+  
+  # Initialize matrices for Kalman filtering
+  Z <- matrix( rep( 1, 1 * K ), nrow = 1 )
+  T <- matrix( rep( 0, K * K ), nrow = K )
+  for ( k in 1:K ){
+    T[k,k] <- rho[k]
+  }
+  Q <- matrix( rep( 0, K * K ), nrow = K )
+  for ( k in 1:K ){
+    Q[k,k] <-  (1-rho[k]^2) * (w[k])
+  }
+  R <- diag(1, K, K)
+  H <- 0
+
+
+  a <- array(0, dim = c(K, 1, n))
+  v <- rep( NA, n )
+  P <- array(0, dim = c(K, K, n))
+  P[, , 1] <- matrix( rep( 0, K * K ), nrow = K )
+  for ( k in 1:K ){
+    P[k,k,1] <-  (w[k])
+  }
+  F <- rep( NA, n )
+  K_filtering <- array(NA, dim = c(K, 1, n))
+  partial <- rep( NA, n )
+
+
+
+  # Forward Kalman filtering
+  for (t in 1:(n-1)){
+
+    v[t] <- Y[t]-Z %*% a[,,t]  # Prediction error
+    F[t] <- Z %*% P[,,t] %*% t(Z) + H  # Prediction error covariance
+    K_filtering[, , t] <- (1/F[t]) * ( T %*% P[,,t] %*% t(Z) )  # Kalman gain
+    partial[t] <- log( (F[t]) )+(v[t])^2/F[t]
+    a[ , , t+1] <- T %*% a[ , , t] + v[t] * K_filtering[ , ,t]  # Predict next state
+    P[ , , t+1] <- T %*% P[ , , t] %*% t( T-K_filtering[ , ,t]%*%Z ) + R %*% Q %*% t(R)  # Predict error covariance
+
+    if (all.equal(target = P[ , , t+1], current = P[ , , t], tolerance = epsilon_filtering_equal) == TRUE){  # Check for convergence
+
+      for (i in (t+1):(n-1)){
+        v[i] <- Y[i]-Z %*% a[,,i]
+        F[i] <- F[t]
+        K_filtering[, , i] <- K_filtering[, , t]
+        partial[i] <- log( (F[t]) )+(v[i])^2/F[t]
+        a[ , , i+1] <- T %*% a[ , , i] + v[i] * K_filtering[ , ,t]
+        P[ , , i+1] <- P[ , , t]
+      }
+      break
+    }
+
+
+  }
+  v[n] <- Y[n]-Z %*% a[,,n]
+  F[n] <- Z %*% P[,,n] %*% t(Z) + H
+  K_filtering[, , n] <- (1/F[n]) * ( T %*% P[,,n] %*% t(Z) )
+  partial[n] <- log( (F[n]) )+(v[n])^2/F[n]
+
+  loglikelihood <- -n/2*( log(2*pi) ) - 1/2 * sum( partial )
+
+
+  # Smoothing
+  L <- array(0, dim = c(K, K, n))
+  for (t in 1:n){
+    L[,,t] <- T - K_filtering[, , t] %*% Z
+  }
+
+  r <- array(0, dim = c(K, 1, n+1))
+  N <- array(0, dim = c(K, K, n+1))
+  for (j in 1:n ){
+    t = n-j+1
+    r[,,t] <- t(Z) * (1/F[t]) * v[t] + t(L[,,t]) %*% r[,,t+1]
+    N[,,t] <- (1/F[t]) * t(Z) %*% Z + t(L[,,t]) %*% N[,,t+1] %*% L[,,t]
+  }
+  E_eta <- array(0, dim = c(K, 1, n))
+  Var_eta <- array(0, dim = c(K, K, n))
+  for (t in 1:n){
+    E_eta[,,t] <- Q %*% t(R) %*% r[,,t+1]
+    Var_eta[,,t] <- Q - Q %*% t(R) %*% N[,,t+1] %*% R %*% Q
+  }
+
+  temp_matrix <- (P[,,1]%*% r[,,1]) %*% t(P[,,1]%*% r[,,1]) + P[,,1] - P[,,1] %*% N[,,1]%*%P[,,1]
+
+  return_list <- list("temp_matrix" = temp_matrix, "E_eta" = E_eta, "Var_eta" = Var_eta, "loglikelihood" = loglikelihood)
+
+  return(return_list)
+
+}
+
+
+calculate_A <- function( n, K_value, rho_value, temp_matrix, E_eta, Var_eta){
+  K <- K_value
+
+  M <- matrix( rep( 0, K * K ), nrow = K )
+  for (j in 1:(n-1)){
+    M <- M + E_eta[,,j] %*% t(E_eta[,,j]) + Var_eta[,,j]
+  }
+
+  A <- matrix( rep( 0, K * 1 ), nrow = K )
+  for (j in 1:K){
+    A[j,1] <- temp_matrix[j,j] + M[j,j] /  (1 - rho_value[j]^2)
+  }
+
+  return(A)
+}
+
+
+# function for lambda equation
+generate_lambda_equation <- function(n, K_value, vector_A) {
+    function(lambda) {
+        equation <- 2*lambda - n * K_value
+        for (k in 1:K_value) {
+            equation <-  equation + sqrt( n^2 - 4 * lambda * vector_A[k] )
+        }
+        return(equation)
+    }
+}
+
+
+# Function for EM algorithm
+calculate_next_w <- function(one_series_Y, K_value, rho_value, previous_w){
+    # Smoothing
+    n <- length(one_series_Y)
+    smoothing <- calculate_smoothing(one_series_Y, K_value, rho_value, previous_w)
+    vector_A <- calculate_A(n, K_value, rho_value, smoothing$temp_matrix, smoothing$E_eta, smoothing$Var_eta)
+
+    # Solve the equation for lambda
+    equation_lambda <- generate_lambda_equation(n, K_value, vector_A)
+    initial_guesses <- c(n^2 / ( 8 * max(vector_A) ), -n^2 / ( 4 * max(vector_A) ))
+    roots <- sapply(initial_guesses, function(guess) {
+    tryCatch({
+        solution <- nleqslv(x = guess, fn = equation_lambda)
+        if(solution$termcd == 1) return(solution$x)  # Check for convergence
+    }, error = function(e) NA)  # Handle errors in case of non-convergence
+    })
+    unique_roots <- unique(na.omit(roots))
+
+    # Convert the list to a numeric vector if it's not already
+    my_vector <- unlist(unique_roots)
+    # Find the index of the element with the smallest absolute value
+    index_max_abs <- which.max(abs(my_vector))
+
+    # Retrieve the element with the smallest absolute value
+    lambda <- my_vector[index_max_abs]
+
+    # Calculate w from lambda
+    next_w <- rep(0, K_value)
+    for (k in 1:K_value){
+        next_w[k] <- ( n - sqrt(n^2 - 4 * lambda * vector_A[k]) )/ (2 * lambda)
+    }
+    return (list("loglikelihood" = smoothing$loglikelihood, "next_w" = next_w))
+
+}
+
+
+calculate_final_w <- function(one_series_Y, K_value, rho_value, max_iteration){
+  for (i in 1:max_iteration){        #[ begin, end ]
+    if (i==1){
+      current_w <- rep(1/guessed_K, guessed_K)
+      previous_logl <- -Inf
+    }
+
+    
+    result <- calculate_next_w(true_y, guessed_K, guessed_rho, current_w)
+    current_w <- result$next_w
+    current_logl <- result$loglikelihood
+
+    
+    if ( abs(current_logl - previous_logl) < 1e-3){
+      break
+    }
+    previous_logl <- current_logl
+  }
+  return(current_w)
+
+}
+
+```
+
+
+```{r}
+# Initialize simulation_results
+simulation_results <- matrix(nrow = n_simulation, ncol = guessed_K)
+
+```
+
+
+```{r}
+# Define the range for the simulations
+begin_true_y <- 1
+end_true_y <- 100
+
+# Set the maximum number of iterations for the simulation function
+max_iteration <- 3000
+
+# Loop through the specified range of simulations
+for (no_current_simu in begin_true_y:end_true_y) {
+  print("simulation")
+  print(no_current_simu)
+  
+  # Get the true_y value for the current simulation
+  true_y <- all_true_y[no_current_simu,]
+  
+  # Store the result of the simulation
+  simulation_results[no_current_simu, ] <- calculate_final_w(true_y, guessed_K, guessed_rho, max_iteration)
+}
+
+# Write the simulation results to a CSV file
+write.csv(simulation_results, "simulation_K20_T200.csv", row.names = FALSE)
+```
+
